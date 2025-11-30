@@ -32,7 +32,7 @@ jobs:
 
       - name: Run training
         run: |
-          python model training/train-model.py
+          python train/train-model.py
 
       - name: Commit and push updated model
         run: |
