@@ -7,6 +7,7 @@ def main():
         epochs=20,
         imgsz=416,
         batch=16,
+        device=0,
     )
 
 if __name__ == "__main__":
