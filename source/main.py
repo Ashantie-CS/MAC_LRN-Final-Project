@@ -1,11 +1,31 @@
 from ultralytics.utils.plotting import Annotator
-import numpy as np
-import cv2
 from ultralytics import YOLO
 
+import os
+import re
+import numpy as np
+import cv2
+
+
 def main():
-    # Load models
-    personDetector = YOLO('../model training/runs/detect/train6/weights/best.pt')
+    # Initialize model directory
+    dir_path = "../model training/runs/detect"
+    all_trainings = os.listdir(dir_path)
+    latest_training = 0
+
+    # Regex pattern for matching whole number
+    pattern = r"[-+]?\d*\.?\d+"
+
+    # Get latest training
+    for training in all_trainings:
+        match = re.search(pattern, training)
+        if match:
+            version_number = int(match.group())
+            if latest_training < version_number:
+                latest_training = version_number
+        
+    # Load latest model
+    personDetector = YOLO(f'../model training/runs/detect/train{latest_training}/weights/best.pt')
 
     # Open default camera (0 = default, 1 = external)
     cap = cv2.VideoCapture(0)
