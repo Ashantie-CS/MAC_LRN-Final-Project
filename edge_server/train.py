@@ -29,6 +29,34 @@ MODEL_PRETRAINED = "yolov8n.pt"  # ultralytics base
 # user must prepare a data.yaml pointing to train/val directories
 DATA_YAML = os.path.join(DATASET_DIR, "data.yaml")  # create this with paths to images/labels
 
+def get_training_device():
+    """
+    Get the appropriate device for training based on the platform.
+    Returns 'mps' for M1 Macs, 'cpu' for other Macs, or '0' for CUDA GPUs.
+    """
+    if platform.system() == "Darwin":  # macOS
+        # Check if MPS (Metal Performance Shaders) is available (M1/M2 Macs)
+        try:
+            import torch
+            if torch.backends.mps.is_available():
+                return "mps"
+            else:
+                return "cpu"
+        except (ImportError, AttributeError):
+            # If torch is not available or MPS check fails, use cpu
+            return "cpu"
+    else:
+        # For Windows/Linux, try CUDA first, fallback to CPU
+        try:
+            import torch
+            if torch.cuda.is_available():
+                return "0"  # CUDA device 0
+            else:
+                return "cpu"
+        except ImportError:
+            # If torch is not available, default to 0 (will be handled by YOLO)
+            return "0"
+
 def get_next_version():
     if not os.path.exists(META_PATH):
         return 1
@@ -38,12 +66,16 @@ def get_next_version():
 def run_training():
     v = get_next_version()
     out_dir = os.path.join(MODELS_DIR, f"run_{v}")  # ultralytics will write results to runs/detect/train by default, but we set project
+    # Get appropriate device for training
+    device = get_training_device()
+    print(f"Using device: {device}")
+    
     # Use ultralytics CLI (must be installed in environment)
     cmd = [
         "yolo", "detect", "train",
         "model="+MODEL_PRETRAINED,
         "data="+DATA_YAML,
-        "device=0",
+        f"device={device}",
         f"epochs={EPOCHS}",
         f"batch={BATCH}",
         f"imgsz={IMGSZ}",
