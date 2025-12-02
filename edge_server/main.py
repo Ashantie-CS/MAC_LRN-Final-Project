@@ -417,12 +417,14 @@ async def upload_detection_data(
             try:
                 # Mark samples as used BEFORE starting training to avoid duplicate triggers
                 mark_samples_as_used()
-                # Trigger retraining in background
-                proc = subprocess.Popen([get_python_cmd(), os.path.join(ROOT, "train.py")])
+                # Trigger retraining in a new terminal window to show progress
+                train_script = os.path.join(ROOT, "train.py")
+                proc = run_in_new_terminal(train_script, window_title="Training Progress")
                 set_training_lock(proc.pid)
                 response["retraining_started"] = True
                 response["training_pid"] = proc.pid
                 response["samples_collected"] = 0  # Reset count after marking as used
+                response["message"] = "Training started in new terminal window"
             except Exception as e:
                 print(f"Warning: Failed to start retraining: {e}")
                 response["retraining_error"] = str(e)
@@ -527,22 +529,23 @@ def download_latest_model():
         headers={"X-Model-Name": model_name}
     )
 
-def run_in_new_terminal(script_path):
+def run_in_new_terminal(script_path, window_title="Process"):
     """
     Runs a Python script in a new terminal window.
     Works on Windows, Linux, and macOS.
     """
     script_path = os.path.abspath(script_path)
     script_dir = os.path.dirname(script_path)
+    python_cmd = get_python_cmd()
     
     if platform.system() == "Windows":
         # Windows: use start command to open new cmd window
         # /k keeps the window open after execution
-        cmd = f'start "Detection" cmd /k "cd /d "{script_dir}" && python "{script_path}"'
+        cmd = f'start "{window_title}" cmd /k "cd /d "{script_dir}" && {python_cmd} "{script_path}"'
         proc = subprocess.Popen(cmd, shell=True)
     elif platform.system() == "Darwin":  # macOS
         # macOS: use osascript to open new Terminal window
-        cmd = f'osascript -e \'tell application "Terminal" to do script "cd \\"{script_dir}\\" && python3 \\"{script_path}\\""\''
+        cmd = f'osascript -e \'tell application "Terminal" to do script "cd \\"{script_dir}\\" && {python_cmd} \\"{script_path}\\""\''
         proc = subprocess.Popen(cmd, shell=True)
     else:  # Linux
         # Linux: try different terminal emulators
@@ -550,13 +553,13 @@ def run_in_new_terminal(script_path):
         for term in terminals:
             try:
                 if term == "gnome-terminal":
-                    cmd = [term, "--", "bash", "-c", f"cd '{script_dir}' && python3 '{script_path}'; exec bash"]
+                    cmd = [term, "--title", window_title, "--", "bash", "-c", f"cd '{script_dir}' && {python_cmd} '{script_path}'; exec bash"]
                 elif term == "xterm":
-                    cmd = [term, "-e", "bash", "-c", f"cd '{script_dir}' && python3 '{script_path}'; exec bash"]
+                    cmd = [term, "-T", window_title, "-e", "bash", "-c", f"cd '{script_dir}' && {python_cmd} '{script_path}'; exec bash"]
                 elif term == "konsole":
-                    cmd = [term, "-e", "bash", "-c", f"cd '{script_dir}' && python3 '{script_path}'; exec bash"]
+                    cmd = [term, "--title", window_title, "-e", "bash", "-c", f"cd '{script_dir}' && {python_cmd} '{script_path}'; exec bash"]
                 elif term == "terminator":
-                    cmd = [term, "-e", f"cd '{script_dir}' && python3 '{script_path}'; exec bash"]
+                    cmd = [term, "-e", f"cd '{script_dir}' && {python_cmd} '{script_path}'; exec bash"]
                 
                 proc = subprocess.Popen(cmd)
                 break
@@ -564,7 +567,7 @@ def run_in_new_terminal(script_path):
                 continue
         else:
             # Fallback: run in background if no terminal found
-            proc = subprocess.Popen(["python3", script_path], cwd=script_dir)
+            proc = subprocess.Popen([python_cmd, script_path], cwd=script_dir)
     
     return proc
 
@@ -607,13 +610,14 @@ def trigger_train():
                 "message": "Training is already in progress, please wait"
             })
         
-        # Start training
-        proc = subprocess.Popen([get_python_cmd(), os.path.join(ROOT, "train.py")])
+        # Start training in a new terminal window to show progress
+        train_script = os.path.join(ROOT, "train.py")
+        proc = run_in_new_terminal(train_script, window_title="Training Progress")
         set_training_lock(proc.pid)
         return JSONResponse({
             "status": "training_started",
             "pid": proc.pid,
-            "message": "No model found, starting training"
+            "message": "No model found, starting training in new terminal window"
         })
 
 @app.get("/download_detection_script")
