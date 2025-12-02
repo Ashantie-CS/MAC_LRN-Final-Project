@@ -11,6 +11,13 @@ import io
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+def get_python_cmd():
+    """Get the correct Python command based on the platform."""
+    if platform.system() == "Darwin":  # macOS
+        return "python3"
+    else:
+        return "python"
+
 ROOT = os.path.dirname(__file__)
 DATA_DIR = os.path.join(ROOT, "data")
 RAW_DIR = os.path.join(DATA_DIR, "raw")
@@ -411,7 +418,7 @@ async def upload_detection_data(
                 # Mark samples as used BEFORE starting training to avoid duplicate triggers
                 mark_samples_as_used()
                 # Trigger retraining in background
-                proc = subprocess.Popen(["python", os.path.join(ROOT, "train.py")])
+                proc = subprocess.Popen([get_python_cmd(), os.path.join(ROOT, "train.py")])
                 set_training_lock(proc.pid)
                 response["retraining_started"] = True
                 response["training_pid"] = proc.pid
@@ -601,7 +608,7 @@ def trigger_train():
             })
         
         # Start training
-        proc = subprocess.Popen(["python", os.path.join(ROOT, "train.py")])
+        proc = subprocess.Popen([get_python_cmd(), os.path.join(ROOT, "train.py")])
         set_training_lock(proc.pid)
         return JSONResponse({
             "status": "training_started",

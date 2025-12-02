@@ -1,6 +1,13 @@
 # server/yolo_train.py
-import os, json, subprocess, shutil, sys
+import os, json, subprocess, shutil, sys, platform
 from datetime import datetime
+
+def get_python_cmd():
+    """Get the correct Python command based on the platform."""
+    if platform.system() == "Darwin":  # macOS
+        return "python3"
+    else:
+        return "python"
 
 
 
