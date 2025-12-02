@@ -7,3 +7,4 @@ aiofiles
 requests
 ultralytics
 tensorflow
+opencv-python

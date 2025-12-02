@@ -1,16 +1,21 @@
 # server/yolo_train.py
-import os, json, subprocess, shutil
+import os, json, subprocess, shutil, sys
 from datetime import datetime
+
+
+
+
 
 ROOT = os.path.dirname(__file__)
 DATASET_DIR = os.path.join(ROOT, "data", "dataset")
 MODELS_DIR = os.path.join(ROOT, "models")
 META_PATH = os.path.join(MODELS_DIR, "meta.json")
+TRAIN_LOCK_FILE = os.path.join(ROOT, ".training_lock")
 os.makedirs(MODELS_DIR, exist_ok=True)
 
 # Adjust these params as needed
-EPOCHS = 50
-BATCH = 16
+EPOCHS = 2
+BATCH = 8
 IMGSZ = 640
 MODEL_PRETRAINED = "yolov8n.pt"  # ultralytics base
 
@@ -39,16 +44,57 @@ def run_training():
         "name=" + f"{v}_train"
     ]
     print("Running training:", " ".join(cmd))
-    subprocess.run(cmd, check=True)
+    print(f"Training will save to: {os.path.join(MODELS_DIR, f'{v}_train')}")
+    
+    # Run training and capture output
+    result = subprocess.run(cmd, check=False, capture_output=True, text=True)
+    
+    if result.returncode != 0:
+        print(f"Training command failed with return code {result.returncode}")
+        print("STDOUT:", result.stdout)
+        print("STDERR:", result.stderr)
+        raise RuntimeError(f"Training failed with return code {result.returncode}. Check output above.")
+    
     # ultralytics saves best.pt under models/<project>/<name>/weights/best.pt
     # Find the produced best.pt
     candidate_dir = os.path.join(MODELS_DIR, f"{v}_train", "weights")
+    
+    # Check if directory exists
+    if not os.path.exists(candidate_dir):
+        # Try to find model in alternative locations
+        print(f"Warning: Expected weights directory not found: {candidate_dir}")
+        print("Searching for model files in training directory...")
+        
+        # Search in the training directory
+        train_dir = os.path.join(MODELS_DIR, f"{v}_train")
+        for root, dirs, files in os.walk(train_dir):
+            for f in files:
+                if f.endswith(".pt"):
+                    found_path = os.path.join(root, f)
+                    print(f"Found model file at: {found_path}")
+                    return found_path, v
+        
+        raise FileNotFoundError(f"No trained .pt found. Expected at: {candidate_dir}\nTraining directory exists: {os.path.exists(train_dir)}")
+    
     best_pt = os.path.join(candidate_dir, "best.pt")
     if not os.path.exists(best_pt):
         # fallback to last.pt
         best_pt = os.path.join(candidate_dir, "last.pt")
     if not os.path.exists(best_pt):
-        raise FileNotFoundError("No trained .pt found at " + candidate_dir)
+        # Last resort: search the entire training directory
+        train_dir = os.path.join(MODELS_DIR, f"{v}_train")
+        print(f"Warning: No best.pt or last.pt found in {candidate_dir}")
+        print("Searching entire training directory...")
+        for root, dirs, files in os.walk(train_dir):
+            for f in files:
+                if f.endswith(".pt"):
+                    found_path = os.path.join(root, f)
+                    print(f"Found model file at: {found_path}")
+                    return found_path, v
+        
+        raise FileNotFoundError(f"No trained .pt found at {candidate_dir}. Training may have failed or been interrupted.")
+    
+    print(f"Found trained model at: {best_pt}")
     return best_pt, v
 
 def export_to_tflite(pt_path, version):
@@ -90,11 +136,23 @@ def update_meta(version, model_path):
     open(META_PATH, "w").write(json.dumps(meta))
     print("Updated meta:", meta)
 
+def clear_training_lock():
+    """Remove the training lock file."""
+    if os.path.exists(TRAIN_LOCK_FILE):
+        os.remove(TRAIN_LOCK_FILE)
+
 def main():
-    pt, v = run_training()
-    tflite = export_to_tflite(pt, v)
-    update_meta(v, tflite)
-    print("Training+Export complete. Model at:", tflite)
+    try:
+        pt, v = run_training()
+        tflite = export_to_tflite(pt, v)
+        update_meta(v, tflite)
+        print("Training+Export complete. Model at:", tflite)
+    except Exception as e:
+        print(f"Training failed: {e}")
+        raise
+    finally:
+        # Always clear the lock file when training finishes (success or failure)
+        clear_training_lock()
 
 if __name__ == "__main__":
     main()
