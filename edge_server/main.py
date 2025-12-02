@@ -1,5 +1,5 @@
 # server/main.py
-import os, json, time, sqlite3, subprocess, re, sys, platform, logging, traceback
+import os, json, time, sqlite3, subprocess, re, sys, platform, logging, traceback, tempfile, atexit
 from datetime import datetime
 from fastapi import FastAPI, File, UploadFile, Form
 from fastapi.responses import FileResponse, JSONResponse
@@ -544,9 +544,34 @@ def run_in_new_terminal(script_path, window_title="Process"):
         cmd = f'start "{window_title}" cmd /k "cd /d "{script_dir}" && {python_cmd} "{script_path}"'
         proc = subprocess.Popen(cmd, shell=True)
     elif platform.system() == "Darwin":  # macOS
-        # macOS: use osascript to open new Terminal window
-        cmd = f'osascript -e \'tell application "Terminal" to do script "cd \\"{script_dir}\\" && {python_cmd} \\"{script_path}\\""\''
-        proc = subprocess.Popen(cmd, shell=True)
+        # macOS: use osascript to open new Terminal window with proper output handling
+        # Create a temporary shell script that ensures unbuffered output
+        temp_script = tempfile.NamedTemporaryFile(mode='w', suffix='.sh', delete=False)
+        temp_script.write(f'''#!/bin/bash
+cd "{script_dir}"
+export PYTHONUNBUFFERED=1
+{python_cmd} -u "{script_path}"
+echo ""
+echo "Training completed. Press Enter to close this window..."
+read
+''')
+        temp_script.close()
+        os.chmod(temp_script.name, 0o755)
+        
+        # Register cleanup function
+        def cleanup_temp_script():
+            try:
+                if os.path.exists(temp_script.name):
+                    os.remove(temp_script.name)
+            except:
+                pass
+        atexit.register(cleanup_temp_script)
+        
+        # Use osascript to open Terminal with the script
+        # Properly escape the path for AppleScript
+        script_path_escaped = temp_script.name.replace('"', '\\"')
+        applescript = f'tell application "Terminal" to do script "bash \\"{script_path_escaped}\\""'
+        proc = subprocess.Popen(['osascript', '-e', applescript])
     else:  # Linux
         # Linux: try different terminal emulators
         terminals = ["gnome-terminal", "xterm", "konsole", "terminator"]
