@@ -39,7 +39,7 @@ os.makedirs(VALID_LABELS_DIR, exist_ok=True)
 
 # Configuration for continuous learning
 COLLECTION_CONFIG = {
-    "samples_before_retrain": 50,  # Number of new samples before triggering retraining
+    "samples_before_retrain": 5,  # Number of new samples before triggering retraining
     "train_split": 0.8,  # 80% for training, 20% for validation
 }
 
@@ -81,79 +81,63 @@ def mark_samples_as_used():
     conn.close()
 
 def is_training_in_progress():
-    """Check if training is currently in progress."""
+    """Check if training is currently in progress by checking the lock file.
+    
+    Returns:
+        tuple: (is_training, version) where version is the model version being trained,
+               or None if version is not available
+    """
     if not os.path.exists(TRAIN_LOCK_FILE):
-        return False
+        return False, None
     
     try:
-        with open(TRAIN_LOCK_FILE, "r") as f:
-            pid_str = f.read().strip()
-            if not pid_str:
-                # Empty lock file, remove it
-                os.remove(TRAIN_LOCK_FILE)
-                return False
-            pid = int(pid_str)
-        
-        # Check if process is still running
-        if platform.system() == "Windows":
-            # On Windows, use tasklist to check if process exists
-            try:
-                result = subprocess.run(
-                    ["tasklist", "/FI", f"PID eq {pid}", "/NH"],
-                    capture_output=True,
-                    text=True,
-                    timeout=2
-                )
-                # If process is found, tasklist will return a line with the PID
-                if str(pid) in result.stdout:
-                    return True
-                else:
-                    # Process doesn't exist, remove stale lock file
-                    os.remove(TRAIN_LOCK_FILE)
-                    return False
-            except (subprocess.TimeoutExpired, subprocess.SubprocessError, FileNotFoundError, Exception) as e:
-                # Fallback: try os.kill with broader exception handling
-                try:
-                    os.kill(pid, 0)
-                    return True
-                except Exception:
-                    # Process doesn't exist, remove stale lock file
-                    if os.path.exists(TRAIN_LOCK_FILE):
-                        os.remove(TRAIN_LOCK_FILE)
-                    return False
-        else:
-            # On Unix-like systems
-            try:
-                os.kill(pid, 0)
-                return True  # Process exists
-            except (OSError, ProcessLookupError, ValueError):
-                # Process doesn't exist, remove stale lock file
-                if os.path.exists(TRAIN_LOCK_FILE):
-                    os.remove(TRAIN_LOCK_FILE)
-                return False
-    except (ValueError, FileNotFoundError, IOError, OSError) as e:
-        # Invalid lock file or error reading it, remove it
-        logger.warning(f"Error checking training lock file: {e}")
-        if os.path.exists(TRAIN_LOCK_FILE):
+        # Check if lock file is recent (within last 24 hours)
+        # If older, assume it's stale and training has finished/crashed
+        lock_age = time.time() - os.path.getmtime(TRAIN_LOCK_FILE)
+        if lock_age > 86400:  # 24 hours
+            logger.warning("Training lock file is very old, assuming stale")
             try:
                 os.remove(TRAIN_LOCK_FILE)
-            except Exception:
+            except:
                 pass
-        return False
+            return False, None
+        
+        # Try to read version from lock file
+        version = None
+        try:
+            with open(TRAIN_LOCK_FILE, "r") as f:
+                lock_data = json.load(f)
+                version = lock_data.get("version")
+        except (json.JSONDecodeError, KeyError, ValueError):
+            # Old format or invalid JSON, try reading as plain text
+            try:
+                with open(TRAIN_LOCK_FILE, "r") as f:
+                    content = f.read().strip()
+                    # If it's just a number (old format), ignore version
+            except:
+                pass
+        
+        # Lock file exists and is recent, training is likely in progress
+        # The training script itself will clear the lock when it finishes
+        return True, version
     except Exception as e:
-        # Catch any other unexpected errors
-        logger.warning(f"Unexpected error checking training status: {e}")
-        return False
+        logger.warning(f"Failed to check training lock file: {e}")
+        return False, None
 
-def set_training_lock(pid):
-    """Create a lock file with the training process PID."""
+def set_training_lock(version=None):
+    """Create a lock file to indicate training is in progress.
+    
+    Args:
+        version: The version number of the model being trained (optional).
+                 If provided, stored in the lock file to identify which model to exclude.
+    """
+    # Store timestamp and version number
+    lock_data = {
+        "timestamp": int(time.time()),
+        "version": version
+    }
     with open(TRAIN_LOCK_FILE, "w") as f:
-        f.write(str(pid))
-
-def clear_training_lock():
-    """Remove the training lock file."""
-    if os.path.exists(TRAIN_LOCK_FILE):
-        os.remove(TRAIN_LOCK_FILE)
+        json.dump(lock_data, f)
 
 def save_collected_sample(image_path, label_path):
     """Save record of collected sample."""
@@ -186,20 +170,18 @@ def get_meta():
     with open(META_PATH, "r") as f:
         return json.load(f)
 
-def update_meta(version, model_path):
-    meta = {"version": version, "model_path": model_path, "created_at": datetime.utcnow().isoformat()}
-    with open(META_PATH, "w") as f:
-        json.dump(meta, f)
-    return meta
-
 # Helper function to find available training models
 def find_available_models():
     """
     Finds all available training models in the models directory.
+    Only includes models that are fully trained (training lock is not active for them).
     Returns a list of tuples: [(model_name, model_path, version_number), ...] sorted by version (newest first)
     """
     if not os.path.exists(MODELS_DIR):
         return []
+    
+    # Check if training is currently in progress and get the version being trained
+    training_in_progress, training_version = is_training_in_progress()
     
     all_trainings = os.listdir(MODELS_DIR)
     available_models = []
@@ -223,24 +205,79 @@ def find_available_models():
             # Check if model file exists
             model_path = os.path.join(MODELS_DIR, training, "weights", "best.pt")
             if os.path.exists(model_path):
-                available_models.append((training, model_path, version_number))
+                # Check if training is complete for this model
+                # Training creates a .training_complete marker file when it finishes
+                train_dir = os.path.join(MODELS_DIR, training)
+                completion_marker = os.path.join(train_dir, ".training_complete")
+                
+                # If training is in progress and this is the model being trained, exclude it
+                if training_in_progress and training_version is not None and version_number == training_version:
+                    logger.info(f"Skipping {training} (version {version_number}) - currently being trained")
+                    continue
+                
+                # CRITICAL: Only include models that have completed training (have the completion marker)
+                # YOLO creates best.pt during the first epoch and updates it throughout training,
+                # so we MUST check for the completion marker to ensure training is fully done
+                if os.path.exists(completion_marker):
+                    # Model has completion marker - training is fully complete, safe to serve
+                    available_models.append((training, model_path, version_number))
+                else:
+                    # Model doesn't have completion marker - training is either:
+                    # 1. Currently in progress (best.pt exists but training not done)
+                    # 2. An older completed model that finished before we added completion markers
+                    
+                    # Check if this is the model currently being trained
+                    is_currently_training = training_in_progress and training_version is not None and version_number == training_version
+                    
+                    if is_currently_training:
+                        # This is the model currently being trained - NEVER include it
+                        # even though best.pt exists (it's being updated during training)
+                        logger.info(f"Skipping {training} (version {version_number}) - currently being trained (no completion marker)")
+                        continue
+                    
+                    # Not currently being trained, but no completion marker
+                    # If this model is OLDER than the one being trained, it must be complete
+                    # (otherwise a newer training wouldn't have started)
+                    if training_in_progress and training_version is not None:
+                        if version_number < training_version:
+                            # This is an older model - if training for a newer version started,
+                            # this one must have completed. Create marker and include it.
+                            try:
+                                os.makedirs(train_dir, exist_ok=True)
+                                with open(completion_marker, "w") as f:
+                                    f.write(str(int(time.time())))
+                                logger.info(f"Created completion marker for {training} (version {version_number}) - older than training version {training_version}")
+                                available_models.append((training, model_path, version_number))
+                            except Exception as e:
+                                logger.warning(f"Failed to create completion marker for {training}: {e}")
+                                # Still include it - it's older than the one being trained, so it's complete
+                                logger.info(f"Including {training} (version {version_number}) - older than training version {training_version}")
+                                available_models.append((training, model_path, version_number))
+                        else:
+                            # This model version is >= the one being trained, but no marker
+                            # It might be incomplete or from a failed training
+                            logger.info(f"Skipping {training} (version {version_number}) - no completion marker and version >= training version {training_version}")
+                    elif not training_in_progress:
+                        # No training in progress, so this model must be complete
+                        # Create marker retroactively for backward compatibility
+                        try:
+                            os.makedirs(train_dir, exist_ok=True)
+                            with open(completion_marker, "w") as f:
+                                f.write(str(int(time.time())))
+                            logger.info(f"Created completion marker for {training} (version {version_number}) - no training in progress")
+                            available_models.append((training, model_path, version_number))
+                        except Exception as e:
+                            logger.warning(f"Failed to create completion marker for {training}: {e}")
+                            # Still include it if no training is in progress (backward compatibility)
+                            available_models.append((training, model_path, version_number))
+                    else:
+                        # Training is in progress but we don't know which version
+                        # Be conservative: don't include models without markers
+                        logger.info(f"Skipping {training} (version {version_number}) - no completion marker and training in progress (unknown version)")
     
     # Sort by version number (newest first)
     available_models.sort(key=lambda x: x[2], reverse=True)
     return available_models
-
-def find_latest_model():
-    """
-    Finds the latest training model in the models directory.
-    Returns a tuple (model_path, model_name) if found, (None, None) otherwise.
-    """
-    available_models = find_available_models()
-    if not available_models:
-        return None, None
-    
-    # Return the latest (first in sorted list)
-    model_name, model_path, _ = available_models[0]
-    return model_path, model_name
 
 def find_any_available_model():
     """
@@ -397,7 +434,7 @@ async def upload_detection_data(
             should_retrain = sample_count >= COLLECTION_CONFIG["samples_before_retrain"]
             
             # Check if training is already in progress
-            training_in_progress = is_training_in_progress()
+            training_in_progress, _ = is_training_in_progress()
         except Exception as e:
             print(f"Warning: Failed to check training status: {e}")
             sample_count = 0
@@ -417,12 +454,21 @@ async def upload_detection_data(
             try:
                 # Mark samples as used BEFORE starting training to avoid duplicate triggers
                 mark_samples_as_used()
+                # Get the next version number that will be used for training
+                # We need to read it the same way train.py does
+                meta_path = os.path.join(MODELS_DIR, "meta.json")
+                if os.path.exists(meta_path):
+                    with open(meta_path, "r") as f:
+                        meta = json.load(f)
+                        next_version = meta.get("version", 0) + 1
+                else:
+                    next_version = 1
+                
                 # Trigger retraining in a new terminal window to show progress
                 train_script = os.path.join(ROOT, "train.py")
+                set_training_lock(next_version)  # Set lock with version number
                 proc = run_in_new_terminal(train_script, window_title="Training Progress")
-                set_training_lock(proc.pid)
                 response["retraining_started"] = True
-                response["training_pid"] = proc.pid
                 response["samples_collected"] = 0  # Reset count after marking as used
                 response["message"] = "Training started in new terminal window"
             except Exception as e:
@@ -445,7 +491,7 @@ async def upload_detection_data(
 def collection_status():
     """Get status of data collection."""
     sample_count = get_collected_sample_count()
-    training_in_progress = is_training_in_progress()
+    training_in_progress, _ = is_training_in_progress()
     return {
         "samples_collected": sample_count,
         "samples_needed": COLLECTION_CONFIG["samples_before_retrain"],
@@ -459,13 +505,20 @@ def check_model_update(current_model: str = None):
     Check if a newer model is available.
     Returns the latest model name and info for comparison.
     """
-    latest_model_path, latest_model_name = find_any_available_model()
+    # Get all available models (only completed ones)
+    available_models = find_available_models()
     
-    if not latest_model_path:
+    if not available_models:
         return {
             "available": False,
-            "message": "No models available"
+            "message": "No completed models available"
         }
+    
+    # Get the latest available model
+    latest_model_name, latest_model_path, latest_version = available_models[0]  # Already sorted by version
+    
+    logger.info(f"Available models: {[m[0] for m in available_models]}")
+    logger.info(f"Latest available model: {latest_model_name} (version {latest_version})")
     
     # If no current model specified, return latest
     if not current_model:
@@ -473,22 +526,33 @@ def check_model_update(current_model: str = None):
             "available": True,
             "latest_model": latest_model_name,
             "model_path": latest_model_path,
-            "is_newer": True
+            "is_newer": True,
+            "latest_version": latest_version
         }
     
     # Compare versions
-    available_models = find_available_models()
     current_version = None
-    latest_version = None
-    
     pattern = r"train(\d+)?$"
+    
+    # Find current model version in available models
     for model_name, _, version in available_models:
         if model_name == current_model:
             current_version = version
-        if model_name == latest_model_name:
-            latest_version = version
+            break
     
-    is_newer = (current_version is None) or (latest_version is not None and latest_version > current_version)
+    # If current model not found in available models, it might be an old/incomplete model
+    if current_version is None:
+        # Try to extract version from current_model name
+        match = re.search(pattern, current_model)
+        if match:
+            version_str = match.group(1)
+            current_version = int(version_str) if version_str else 1
+        else:
+            current_version = 0  # Unknown model, treat as version 0
+    
+    is_newer = latest_version > current_version if current_version is not None else True
+    
+    logger.info(f"Model update check: current={current_model} (v{current_version}), latest={latest_model_name} (v{latest_version}), is_newer={is_newer}")
     
     return {
         "available": True,
@@ -503,13 +567,6 @@ def check_model_update(current_model: str = None):
 @app.get("/latest_model")
 def latest_model():
     return get_meta()
-
-@app.get("/download_model/{version}")
-def download_model(version: int):
-    model_file = os.path.join(MODELS_DIR, str(version), "model.tflite")
-    if not os.path.exists(model_file):
-        return JSONResponse({"error":"not found"}, status_code=404)
-    return FileResponse(model_file, filename=f"model_v{version}.tflite", media_type="application/octet-stream")
 
 @app.get("/download_latest_model")
 def download_latest_model():
@@ -629,7 +686,8 @@ def trigger_train():
             })
     else:
         # If no model found, check if training is already in progress
-        if is_training_in_progress():
+        training_in_progress, _ = is_training_in_progress()
+        if training_in_progress:
             return JSONResponse({
                 "status": "training_in_progress",
                 "message": "Training is already in progress, please wait"
@@ -637,11 +695,10 @@ def trigger_train():
         
         # Start training in a new terminal window to show progress
         train_script = os.path.join(ROOT, "train.py")
+        set_training_lock()  # Set lock before starting training
         proc = run_in_new_terminal(train_script, window_title="Training Progress")
-        set_training_lock(proc.pid)
         return JSONResponse({
             "status": "training_started",
-            "pid": proc.pid,
             "message": "No model found, starting training in new terminal window"
         })
 
