@@ -21,7 +21,7 @@ TRAIN_LOCK_FILE = os.path.join(ROOT, ".training_lock")
 os.makedirs(MODELS_DIR, exist_ok=True)
 
 # Adjust these params as needed
-EPOCHS = 2
+EPOCHS = 1
 BATCH = 8  # Reduced from 12 to help prevent memory issues
 IMGSZ = 640
 MODEL_PRETRAINED = "yolov8n.pt"  # ultralytics base
@@ -263,37 +263,11 @@ def main():
     try:
         pt, v = run_training()
         update_meta(v, pt)
-        
-        # Create a completion marker file to indicate training finished successfully
-        # This ensures the model is only served after training is complete
-        train_dir = os.path.join(MODELS_DIR, f"{v}_train")
-        completion_marker = os.path.join(train_dir, ".training_complete")
-        
-        try:
-            # Ensure the training directory exists
-            os.makedirs(train_dir, exist_ok=True)
-            with open(completion_marker, "w") as f:
-                f.write(str(int(time.time())))
-            print(f"✓ Created completion marker: {completion_marker}")
-        except Exception as marker_error:
-            print(f"⚠ Warning: Failed to create completion marker: {marker_error}")
-            # Don't fail the whole training if marker creation fails
-        
         print("Training complete. Model at:", pt)
     except Exception as e:
         print(f"Training failed: {e}")
-        # If training failed but we have a version, try to create a marker anyway
-        # (in case the model file exists but something else failed)
-        if v is not None:
-            try:
-                train_dir = os.path.join(MODELS_DIR, f"{v}_train")
-                completion_marker = os.path.join(train_dir, ".training_complete")
-                if os.path.exists(train_dir):
-                    with open(completion_marker, "w") as f:
-                        f.write(str(int(time.time())))
-                    print(f"✓ Created completion marker despite error: {completion_marker}")
-            except:
-                pass
+        import traceback
+        traceback.print_exc()
         raise
     finally:
         # Always clear the lock file when training finishes (success or failure)

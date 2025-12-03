@@ -20,7 +20,7 @@ SERVER_URL = os.environ.get("SERVER_URL", "http://localhost:8000")
 SEND_INTERVAL = float(os.environ.get("SEND_INTERVAL", "5.0"))  # Send data every 5 seconds
 MIN_CONFIDENCE = float(os.environ.get("MIN_CONFIDENCE", "0.5"))  # Minimum confidence to send
 SEND_DATA = os.environ.get("SEND_DATA", "true").lower() == "true"  # Enable/disable data sending
-MODEL_CHECK_INTERVAL = float(os.environ.get("MODEL_CHECK_INTERVAL", "30.0"))  # Check for new models every 30 seconds
+MODEL_CHECK_INTERVAL = float(os.environ.get("MODEL_CHECK_INTERVAL", "120.0"))  # Check for new models every 2 minutes (120 seconds)
 
 class ModelUpdater:
     """Handles checking for and updating to newer models."""

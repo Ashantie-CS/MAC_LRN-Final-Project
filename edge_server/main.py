@@ -174,7 +174,7 @@ def get_meta():
 def find_available_models():
     """
     Finds all available training models in the models directory.
-    Only includes models that are fully trained (training lock is not active for them).
+    Only excludes models that are currently being trained.
     Returns a list of tuples: [(model_name, model_path, version_number), ...] sorted by version (newest first)
     """
     if not os.path.exists(MODELS_DIR):
@@ -205,75 +205,13 @@ def find_available_models():
             # Check if model file exists
             model_path = os.path.join(MODELS_DIR, training, "weights", "best.pt")
             if os.path.exists(model_path):
-                # Check if training is complete for this model
-                # Training creates a .training_complete marker file when it finishes
-                train_dir = os.path.join(MODELS_DIR, training)
-                completion_marker = os.path.join(train_dir, ".training_complete")
-                
                 # If training is in progress and this is the model being trained, exclude it
                 if training_in_progress and training_version is not None and version_number == training_version:
                     logger.info(f"Skipping {training} (version {version_number}) - currently being trained")
                     continue
                 
-                # CRITICAL: Only include models that have completed training (have the completion marker)
-                # YOLO creates best.pt during the first epoch and updates it throughout training,
-                # so we MUST check for the completion marker to ensure training is fully done
-                if os.path.exists(completion_marker):
-                    # Model has completion marker - training is fully complete, safe to serve
-                    available_models.append((training, model_path, version_number))
-                else:
-                    # Model doesn't have completion marker - training is either:
-                    # 1. Currently in progress (best.pt exists but training not done)
-                    # 2. An older completed model that finished before we added completion markers
-                    
-                    # Check if this is the model currently being trained
-                    is_currently_training = training_in_progress and training_version is not None and version_number == training_version
-                    
-                    if is_currently_training:
-                        # This is the model currently being trained - NEVER include it
-                        # even though best.pt exists (it's being updated during training)
-                        logger.info(f"Skipping {training} (version {version_number}) - currently being trained (no completion marker)")
-                        continue
-                    
-                    # Not currently being trained, but no completion marker
-                    # If this model is OLDER than the one being trained, it must be complete
-                    # (otherwise a newer training wouldn't have started)
-                    if training_in_progress and training_version is not None:
-                        if version_number < training_version:
-                            # This is an older model - if training for a newer version started,
-                            # this one must have completed. Create marker and include it.
-                            try:
-                                os.makedirs(train_dir, exist_ok=True)
-                                with open(completion_marker, "w") as f:
-                                    f.write(str(int(time.time())))
-                                logger.info(f"Created completion marker for {training} (version {version_number}) - older than training version {training_version}")
-                                available_models.append((training, model_path, version_number))
-                            except Exception as e:
-                                logger.warning(f"Failed to create completion marker for {training}: {e}")
-                                # Still include it - it's older than the one being trained, so it's complete
-                                logger.info(f"Including {training} (version {version_number}) - older than training version {training_version}")
-                                available_models.append((training, model_path, version_number))
-                        else:
-                            # This model version is >= the one being trained, but no marker
-                            # It might be incomplete or from a failed training
-                            logger.info(f"Skipping {training} (version {version_number}) - no completion marker and version >= training version {training_version}")
-                    elif not training_in_progress:
-                        # No training in progress, so this model must be complete
-                        # Create marker retroactively for backward compatibility
-                        try:
-                            os.makedirs(train_dir, exist_ok=True)
-                            with open(completion_marker, "w") as f:
-                                f.write(str(int(time.time())))
-                            logger.info(f"Created completion marker for {training} (version {version_number}) - no training in progress")
-                            available_models.append((training, model_path, version_number))
-                        except Exception as e:
-                            logger.warning(f"Failed to create completion marker for {training}: {e}")
-                            # Still include it if no training is in progress (backward compatibility)
-                            available_models.append((training, model_path, version_number))
-                    else:
-                        # Training is in progress but we don't know which version
-                        # Be conservative: don't include models without markers
-                        logger.info(f"Skipping {training} (version {version_number}) - no completion marker and training in progress (unknown version)")
+                # Model exists and is not currently being trained - include it
+                available_models.append((training, model_path, version_number))
     
     # Sort by version number (newest first)
     available_models.sort(key=lambda x: x[2], reverse=True)
@@ -693,9 +631,18 @@ def trigger_train():
                 "message": "Training is already in progress, please wait"
             })
         
+        # Calculate the next version number (same logic as train.py)
+        meta_path = os.path.join(MODELS_DIR, "meta.json")
+        if os.path.exists(meta_path):
+            with open(meta_path, "r") as f:
+                meta = json.load(f)
+                next_version = meta.get("version", 0) + 1
+        else:
+            next_version = 1
+        
         # Start training in a new terminal window to show progress
         train_script = os.path.join(ROOT, "train.py")
-        set_training_lock()  # Set lock before starting training
+        set_training_lock(next_version)  # Set lock with version number
         proc = run_in_new_terminal(train_script, window_title="Training Progress")
         return JSONResponse({
             "status": "training_started",
